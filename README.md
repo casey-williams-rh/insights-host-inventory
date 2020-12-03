@@ -4,6 +4,10 @@ You've arrived at the repo for the backend of the Host Based Inventory (HBI).If 
 looking for API, integration or user documentation for HBI please see the [Inventory section
 in our Platform Docs site] (https://platform-docs.cloud.paas.psi.redhat.com/backend/inventory.html).
 
+# Don't Merge This Change
+
+I'm only pushing this commit so I can test the PR template.
+
 # Getting Started
 
 This project uses pipenv to manage the development and deployment environments.
