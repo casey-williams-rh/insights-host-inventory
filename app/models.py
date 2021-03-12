@@ -146,6 +146,7 @@ class Host(db.Model):
     system_profile_facts = db.Column(JSONB)
     stale_timestamp = db.Column(db.DateTime(timezone=True))
     reporter = db.Column(db.String(255))
+    per_reporter_staleness = db.Column(JSONB)
 
     def __init__(
         self,
@@ -165,7 +166,7 @@ class Host(db.Model):
                 title="Invalid request", detail="At least one of the canonical fact fields must be present."
             )
 
-        if (not stale_timestamp and reporter) or (stale_timestamp and not reporter):
+        if not stale_timestamp or not reporter:
             raise InventoryException(
                 title="Invalid request", detail="Both stale_timestamp and reporter fields must be present."
             )
@@ -184,6 +185,7 @@ class Host(db.Model):
         self.system_profile_facts = system_profile_facts or {}
         self.stale_timestamp = stale_timestamp
         self.reporter = reporter
+        self._update_per_reporter_staleness(stale_timestamp, reporter)
 
     def save(self):
         self._cleanup_tags()
@@ -207,6 +209,7 @@ class Host(db.Model):
             self._update_system_profile(input_host.system_profile_facts)
 
         self._update_stale_timestamp(input_host.stale_timestamp, input_host.reporter)
+        self._update_per_reporter_staleness(input_host.stale_timestamp, input_host.reporter)
 
     def patch(self, patch_data):
         logger.debug("patching host (id=%s) with data: %s", self.id, patch_data)
@@ -257,6 +260,20 @@ class Host(db.Model):
     def _update_stale_timestamp(self, stale_timestamp, reporter):
         self.stale_timestamp = stale_timestamp
         self.reporter = reporter
+
+    def _update_per_reporter_staleness(self, stale_timestamp, reporter):
+        if not self.per_reporter_staleness:
+            self.per_reporter_staleness = {}
+
+        if not self.per_reporter_staleness.get(reporter):
+            self.per_reporter_staleness[reporter] = {}
+
+        self.per_reporter_staleness[reporter].update(
+            stale_timestamp=stale_timestamp.isoformat(),
+            last_check_in=datetime.now(timezone.utc).isoformat(),
+            check_in_succeeded=True,
+        )
+        orm.attributes.flag_modified(self, "per_reporter_staleness")
 
     def _update_modified_date(self):
         self.modified_on = datetime.now(timezone.utc)
@@ -327,6 +344,10 @@ class DiskDeviceSchema(MarshmallowSchema):
     type = fields.Str(validate=marshmallow_validate.Length(max=256))
 
 
+class RhsmSchema(MarshmallowSchema):
+    version = fields.Str(validate=marshmallow_validate.Length(max=255))
+
+
 class OperatingSystemSchema(MarshmallowSchema):
     major = fields.Int()
     minor = fields.Int()
@@ -362,64 +383,6 @@ class NetworkInterfaceSchema(MarshmallowSchema):
     type = fields.Str(validate=marshmallow_validate.Length(max=18))
 
 
-class SystemProfileSchema(MarshmallowSchema):
-    owner_id = fields.Str(validate=verify_uuid_format)
-    number_of_cpus = fields.Int()
-    number_of_sockets = fields.Int()
-    cores_per_socket = fields.Int()
-    system_memory_bytes = fields.Int()
-    infrastructure_type = fields.Str(validate=marshmallow_validate.Length(max=100))
-    infrastructure_vendor = fields.Str(validate=marshmallow_validate.Length(max=100))
-    network_interfaces = fields.List(fields.Nested(NetworkInterfaceSchema()))
-    disk_devices = fields.List(fields.Nested(DiskDeviceSchema()))
-    bios_vendor = fields.Str(validate=marshmallow_validate.Length(max=100))
-    bios_version = fields.Str(validate=marshmallow_validate.Length(max=100))
-    bios_release_date = fields.Str(validate=marshmallow_validate.Length(max=50))
-    cpu_flags = fields.List(fields.Str(validate=marshmallow_validate.Length(max=30)))
-    operating_system = fields.Nested(OperatingSystemSchema())
-    os_release = fields.Str(validate=marshmallow_validate.Length(max=100))
-    os_kernel_version = fields.Str(
-        validate=[marshmallow_validate.Length(max=20), marshmallow_validate.Regexp(regex=r"^\d+\.\d+\.\d+(\.\d+)?$")]
-    )
-    arch = fields.Str(validate=marshmallow_validate.Length(max=50))
-    kernel_modules = fields.List(fields.Str(validate=marshmallow_validate.Length(max=255)))
-    last_boot_time = fields.Str(validate=marshmallow_validate.Length(max=50))
-    running_processes = fields.List(fields.Str(validate=marshmallow_validate.Length(max=1000)))
-    subscription_status = fields.Str(validate=marshmallow_validate.Length(max=100))
-    subscription_auto_attach = fields.Str(validate=marshmallow_validate.Length(max=100))
-    katello_agent_running = fields.Bool()
-    satellite_managed = fields.Bool()
-    cloud_provider = fields.Str(validate=marshmallow_validate.Length(max=100))
-    yum_repos = fields.List(fields.Nested(YumRepoSchema()))
-    dnf_modules = fields.List(fields.Nested(DnfModuleSchema()))
-    installed_products = fields.List(fields.Nested(InstalledProductSchema()))
-    insights_client_version = fields.Str(validate=marshmallow_validate.Length(max=50))
-    insights_egg_version = fields.Str(validate=marshmallow_validate.Length(max=50))
-    captured_date = fields.Str(validate=marshmallow_validate.Length(max=32))
-    installed_packages = fields.List(fields.Str(validate=marshmallow_validate.Length(max=512)))
-    installed_packages_delta = fields.List(fields.Str(validate=marshmallow_validate.Length(max=512)))
-    installed_services = fields.List(fields.Str(validate=marshmallow_validate.Length(max=512)))
-    enabled_services = fields.List(fields.Str(validate=marshmallow_validate.Length(max=512)))
-    sap_system = fields.Bool()
-    sap_sids = fields.List(
-        fields.Str(
-            validate=[marshmallow_validate.Length(max=3), marshmallow_validate.Regexp(regex=r"^[A-Z][A-Z0-9]{2}$")]
-        )
-    )
-    sap_instance_number = fields.Str(
-        validate=[marshmallow_validate.Length(max=2), marshmallow_validate.Regexp(regex=r"^[0-9]{2}$")]
-    )
-    sap_version = fields.Str(
-        validate=[
-            marshmallow_validate.Length(max=22),
-            marshmallow_validate.Regexp(regex=r"^[0-9].[0-9]{2}.[0-9]{3}.[0-9]{2}.[0-9]{10}$"),
-        ]
-    )
-    tuned_profile = fields.Str(validate=marshmallow_validate.Length(max=256))
-    selinux_current_mode = fields.Str(validate=marshmallow_validate.OneOf(["enforcing", "permissive", "disabled"]))
-    selinux_config_file = fields.Str(validate=marshmallow_validate.OneOf(["enforcing", "permissive", "disabled"]))
-
-
 class FactsSchema(MarshmallowSchema):
     namespace = fields.Str()
     facts = fields.Dict(validate=check_empty_keys)
@@ -447,21 +410,13 @@ class CanonicalFactsSchema(MarshmallowSchema):
     external_id = fields.Str(validate=marshmallow_validate.Length(min=1, max=500))
 
 
-class BaseHostSchema(CanonicalFactsSchema):
+class HostSchema(CanonicalFactsSchema):
     display_name = fields.Str(validate=marshmallow_validate.Length(min=1, max=200))
     ansible_host = fields.Str(validate=marshmallow_validate.Length(min=0, max=255))
     account = fields.Str(required=True, validate=marshmallow_validate.Length(min=1, max=10))
     facts = fields.List(fields.Nested(FactsSchema))
     stale_timestamp = fields.DateTime(required=True, timezone=True)
     reporter = fields.Str(required=True, validate=marshmallow_validate.Length(min=1, max=255))
-
-    @validates("stale_timestamp")
-    def has_timezone_info(self, timestamp):
-        if timestamp.tzinfo is None:
-            raise MarshmallowValidationError("Timestamp must contain timezone info")
-
-
-class MqHostSchema(BaseHostSchema):
     system_profile = fields.Dict()
     tags = fields.Raw(allow_none=True)
 
@@ -472,6 +427,11 @@ class MqHostSchema(BaseHostSchema):
             cls.system_profile_normalizer = SystemProfileNormalizer()
         if system_profile_schema:
             self.system_profile_normalizer = SystemProfileNormalizer(system_profile_schema=system_profile_schema)
+
+    @validates("stale_timestamp")
+    def has_timezone_info(self, timestamp):
+        if timestamp.tzinfo is None:
+            raise MarshmallowValidationError("Timestamp must contain timezone info")
 
     @validates("tags")
     def validate_tags(self, tags):
@@ -541,13 +501,6 @@ class MqHostSchema(BaseHostSchema):
         for dd_i, disk_device in enumerate(system_profile.get("disk_devices", [])):
             if not check_empty_keys(disk_device.get("options")):
                 raise MarshmallowValidationError(f"Empty key in /system_profile/disk_devices/{dd_i}/options.")
-
-
-class HttpHostSchema(BaseHostSchema):
-    system_profile = fields.Nested(SystemProfileSchema)
-
-    def __init__(self, system_profile_schema=None, *args, **kwargs):
-        super().__init__(*args, **kwargs)
 
 
 class PatchHostSchema(MarshmallowSchema):
